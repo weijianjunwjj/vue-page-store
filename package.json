@@ -1,0 +1,40 @@
+{
+  "name": "vue-page-store",
+  "version": "0.1.0",
+  "description": "Vue 2.6 页面级 Store —— 状态、通信、生命周期，一个作用域全收",
+  "author": "weijianjun",
+  "license": "MIT",
+  "main": "dist/index.cjs.js",
+  "module": "dist/index.esm.js",
+  "unpkg": "dist/index.umd.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "rollup -c rollup.config.mjs && cp src/index.d.ts dist/index.d.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "vue": "^2.6.0"
+  },
+  "devDependencies": {
+    "rollup": "^3.29.4",
+    "@rollup/plugin-terser": "^0.4.4"
+  },
+  "keywords": [
+    "vue",
+    "vue2",
+    "store",
+    "state-management",
+    "page-store",
+    "micro-frontend",
+    "single-spa"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/weijianjunwjj/vue-page-store.git"
+  }
+}
