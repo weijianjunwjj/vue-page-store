@@ -1,5 +1,5 @@
 /**
- * vue-page-store - Vue 2.6 页面级 Store
+ * vue-page-store 0.2.0 — Vue 2.6 页面级 Store
  *
  * 状态、通信、生命周期，一个作用域全收。
  *
@@ -13,16 +13,17 @@
  */
 
 // Store 注册表（导出供调试 / devtools 使用）
-const storeRegistry = new Map();
+var storeRegistry = new Map();
 
 function createStoreInstance(Vue, id, options) {
-  const initialState = options.state();
-  const getters = options.getters || {};
-  const actions = options.actions || {};
+  var initialState = options.state();
+  var getters = options.getters || {};
+  var actions = options.actions || {};
+  var lifecycles = options.lifecycle || {};
 
   // --- 用一个隐藏的 Vue 实例承载响应式 state + computed getters ---
-  const computedDefs = {};
-  const store = { _disposed: false };
+  var computedDefs = {};
+  var store = { _disposed: false };
 
   Object.keys(getters).forEach(function (key) {
     computedDefs[key] = function () {
@@ -30,14 +31,21 @@ function createStoreInstance(Vue, id, options) {
     };
   });
 
-  const vm = new Vue({
+  var vm = new Vue({
     data: function () {
-      return { $$state: initialState };
+      return {
+        $$state: initialState,
+        $$status: {
+          mounted: false,
+          active: false
+        }
+      };
     },
     computed: computedDefs,
   });
 
-  const rawState = vm.$data.$$state;
+  var rawState = vm.$data.$$state;
+  var rawStatus = vm.$data.$$status;
 
   // ====== state —— 代理到 vm.$$state ======
   Object.keys(initialState).forEach(function (key) {
@@ -62,14 +70,14 @@ function createStoreInstance(Vue, id, options) {
   });
 
   // ====== watch —— 声明式副作用，生命周期自动回收 ======
-  const watches = options.watch || {};
+  var watches = options.watch || {};
   Object.entries(watches).forEach(function (_ref) {
-    const path = _ref[0];
-    const def = _ref[1];
-    const handler = typeof def === 'function' ? def : def.handler;
-    const watchOpts = { deep: true };
+    var path = _ref[0];
+    var def = _ref[1];
+    var handler = typeof def === 'function' ? def : def.handler;
+    var watchOpts = { deep: true };
     if (typeof def === 'object' && def.immediate) watchOpts.immediate = true;
-    const expr = function () {
+    var expr = function () {
       return path.split('.').reduce(function (obj, k) { return obj && obj[k]; }, store);
     };
     vm.$watch(expr, handler.bind(store), watchOpts);
@@ -77,6 +85,7 @@ function createStoreInstance(Vue, id, options) {
 
   // ====== 内置方法 ======
   store.$state = rawState;
+  store.$status = rawStatus;
   store.$id = id;
 
   /**
@@ -84,37 +93,24 @@ function createStoreInstance(Vue, id, options) {
    * @param {Object|Function} partial - 要合并的对象，或 (state) => Object 函数
    */
   store.$patch = function (partial) {
-    const obj = typeof partial === 'function' ? partial(rawState) : partial;
+    var obj = typeof partial === 'function' ? partial(rawState) : partial;
     Object.keys(obj).forEach(function (key) {
       Vue.set(rawState, key, obj[key]);
     });
   };
 
   /**
-   * 订阅 state 变化
-   * @param {Function} callback - (newState) => void
-   * @returns {Function} 取消订阅函数
-   */
-  store.$subscribe = function (callback) {
-    return vm.$watch(
-      function () { return Object.assign({}, rawState); },
-      callback,
-      { deep: true }
-    );
-  };
-
-  /**
    * 重置 state 到初始值
    */
   store.$reset = function () {
-    const fresh = options.state();
+    var fresh = options.state();
     Object.keys(fresh).forEach(function (key) {
       rawState[key] = fresh[key];
     });
   };
 
   // ====== 内置事件总线（页面作用域隔离通信） ======
-  const _listeners = {};
+  var _listeners = {};
 
   /**
    * 发射事件（仅当前 store 作用域内）
@@ -122,7 +118,7 @@ function createStoreInstance(Vue, id, options) {
    * @param {*} payload - 事件数据
    */
   store.$emit = function (event, payload) {
-    const fns = _listeners[event];
+    var fns = _listeners[event];
     if (fns) fns.slice().forEach(function (fn) { fn(payload); });
   };
 
@@ -136,7 +132,7 @@ function createStoreInstance(Vue, id, options) {
     if (!_listeners[event]) _listeners[event] = [];
     _listeners[event].push(handler);
     return function () {
-      const idx = _listeners[event].indexOf(handler);
+      var idx = _listeners[event].indexOf(handler);
       if (idx > -1) _listeners[event].splice(idx, 1);
     };
   };
@@ -149,17 +145,77 @@ function createStoreInstance(Vue, id, options) {
   store.$off = function (event, handler) {
     if (!_listeners[event]) return;
     if (handler) {
-      const idx = _listeners[event].indexOf(handler);
+      var idx = _listeners[event].indexOf(handler);
       if (idx > -1) _listeners[event].splice(idx, 1);
     } else {
       delete _listeners[event];
     }
   };
 
+  // ====== 页面生命周期 ======
+
+  /** 触发生命周期钩子 + 广播事件 */
+  function runHook(name, payload) {
+    var hook = lifecycles[name];
+    if (typeof hook === 'function') {
+      hook.call(store, payload);
+    }
+    store.$emit('page:' + name, payload);
+  }
+
   /**
-   * 销毁 store —— 清空事件、销毁 vm、移除注册
+   * 绑定到组件实例，自动挂载生命周期
+   *
+   * 原理：Vue 2 的 vm.$on('hook:xxx') 可监听组件自身生命周期事件，
+   * 这是 Vue 2 内置能力，不是 hack。
+   *
+   * 时序保证：
+   *   无 keep-alive → mounted → beforeDestroy
+   *   有 keep-alive → mounted → activated ⇄ deactivated → beforeDestroy
+   *
+   * 必须在 created 中调用（mounted 之前），否则 hook:mounted 捕获不到。
+   *
+   * @param {Vue} componentVm - 组件实例（通常传 this）
+   * @returns {Object} store - 支持链式调用
+   */
+  store.bindTo = function (componentVm) {
+    if (store._disposed) return store;
+
+    componentVm.$on('hook:mounted', function () {
+      rawStatus.mounted = true;
+      rawStatus.active = true;
+      runHook('mount');
+    });
+
+    componentVm.$on('hook:activated', function () {
+      rawStatus.active = true;
+      runHook('activate');
+    });
+
+    componentVm.$on('hook:deactivated', function () {
+      rawStatus.active = false;
+      runHook('deactivate');
+    });
+
+    componentVm.$on('hook:beforeDestroy', function () {
+      store.$destroy();
+    });
+
+    return store;
+  };
+
+  // ====== $destroy ======
+
+  /**
+   * 销毁 store —— 触发 unmount 钩子、清空事件、销毁 vm、移除注册
    */
   store.$destroy = function () {
+    if (store._disposed) return;
+
+    rawStatus.mounted = false;
+    rawStatus.active = false;
+    runHook('unmount');
+
     store._disposed = true;
     Object.keys(_listeners).forEach(function (key) { delete _listeners[key]; });
     vm.$destroy();
@@ -175,41 +231,47 @@ function createStoreInstance(Vue, id, options) {
  * 定义页面级 Store
  *
  * @param {string} id - 唯一标识
- * @param {Object} options - { state, getters, actions, watch }
- * @returns {Function} useStore - 调用即获取 / 创建 store 实例
+ * @param {Object} options - { state, getters, actions, watch, lifecycle }
+ * @returns {Function} useStore(vm?) - 调用即获取 / 创建 store 实例
  *
  * @example
- * const useFunnelStore = definePageStore('funnelDetail', {
- *   state: () => ({ filters: {}, loading: false }),
+ * var useFunnelStore = definePageStore('funnelDetail', {
+ *   state: function () { return { filters: {}, loading: false }; },
  *   getters: {
- *     isReady() { return !this.loading; }
+ *     isReady: function () { return !this.loading; }
  *   },
  *   actions: {
- *     async fetchData() { ... }
+ *     fetchData: async function () { ... }
+ *   },
+ *   lifecycle: {
+ *     mount:    function () { this.fetchData(); },
+ *     unmount:  function () { console.log('bye'); },
+ *     activate: function () { this.needRefresh && this.fetchData(); }
  *   }
  * });
  *
- * // 组件中
- * const store = useFunnelStore();
- * store.fetchData();
+ * // 组件中（created 里传 this，自动绑定全部生命周期 + 自动销毁）
+ * created() {
+ *   this.store = useFunnelStore(this);
+ * }
  *
- * // 页面销毁时
- * store.$destroy();
+ * // 不需要 lifecycle 时，不传参数，和 0.1.0 完全一样
+ * this.store = useFunnelStore();
  */
 function definePageStore(id, options) {
   if (!id || typeof options.state !== 'function') {
     throw new Error('[vue-page-store] 需要 id 和 state 函数');
   }
 
-  // 缓存 Vue 引用，首次调用时从 store 的 vm 实例获取
-  let _Vue = null;
+  var _Vue = null;
 
-  return function useStore() {
+  return function useStore(componentVm) {
     if (storeRegistry.has(id)) {
-      return storeRegistry.get(id);
+      var existing = storeRegistry.get(id);
+      if (componentVm) existing.bindTo(componentVm);
+      return existing;
     }
 
-    // 自动获取 Vue 构造函数
     if (!_Vue) {
       try {
         _Vue = require('vue');
@@ -221,32 +283,12 @@ function definePageStore(id, options) {
       }
     }
 
-    const store = createStoreInstance(_Vue, id, options);
+    var store = createStoreInstance(_Vue, id, options);
     storeRegistry.set(id, store);
+    if (componentVm) store.bindTo(componentVm);
     return store;
   };
 }
 
-/**
- * 将 store 的 state 属性转为可在模板中使用的 refs 对象
- *
- * @param {Object} store - pageStore 实例
- * @returns {Object} refs 对象（可解构赋值到 computed）
- *
- * @example
- * const { filters, loading } = storeToRefs(store);
- */
-function storeToRefs(store) {
-  const refs = {};
-  Object.keys(store.$state).forEach(function (key) {
-    Object.defineProperty(refs, key, {
-      enumerable: true,
-      get: function () { return store[key]; },
-      set: function (val) { store[key] = val; },
-    });
-  });
-  return refs;
-}
-
-export { definePageStore, storeToRefs, storeRegistry };
-export default { definePageStore, storeToRefs, storeRegistry };
+export { definePageStore, storeRegistry };
+export default { definePageStore, storeRegistry };
