@@ -1,6 +1,6 @@
 {
   "name": "vue-page-store",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Vue 2.6 页面级 Store —— 状态、通信、生命周期，一个作用域全收",
   "author": "weijianjun",
   "license": "MIT",
