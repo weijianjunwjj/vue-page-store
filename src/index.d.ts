@@ -2,22 +2,51 @@
  * vue-page-store - TypeScript 类型定义
  */
 
+/** Vue 2 组件实例的最小接口（避免强依赖 vue 类型包） */
+export interface Vue2ComponentInstance {
+  $on(event: string, handler: Function): void;
+}
+
+/** lifecycle 钩子配置 */
+export interface StoreLifecycle<S extends Record<string, any>> {
+  /** 组件 mounted 时触发 */
+  mount?: (this: PageStore<S>) => void;
+  /** 组件 beforeDestroy 时触发（keep-alive 同） */
+  unmount?: (this: PageStore<S>) => void;
+  /** keep-alive activated 时触发 */
+  activate?: (this: PageStore<S>) => void;
+  /** keep-alive deactivated 时触发 */
+  deactivate?: (this: PageStore<S>) => void;
+}
+
+/** getter/action 的 this 上下文用类型别名表达 */
+type GetterFn<S extends Record<string, any>> =
+  (this: PageStore<S>) => any;
+
+type ActionFn<S extends Record<string, any>> =
+  (this: PageStore<S>, ...args: any[]) => any;
+
+type WatchHandler<S extends Record<string, any>> =
+  (this: PageStore<S>, newVal: any, oldVal: any) => void;
+
 export interface StoreOptions<S extends Record<string, any>> {
-  /** 返回初始 state 的工厂函数 */
   state: () => S;
-  /** 计算属性（getter 内部 this 指向 store） */
-  getters?: Record<string, (this: Store<S>) => any>;
-  /** 操作方法（action 内部 this 指向 store） */
-  actions?: Record<string, (this: Store<S>, ...args: any[]) => any>;
-  /** 声明式侦听器（支持点路径 'a.b.c' 或对象配置） */
-  watch?: Record<
-    string,
-    | ((this: Store<S>, newVal: any, oldVal: any) => void)
-    | {
-        handler: (this: Store<S>, newVal: any, oldVal: any) => void;
-        immediate?: boolean;
-      }
-  >;
+  getters?:  { [key: string]: GetterFn<S> };
+  actions?:  { [key: string]: ActionFn<S> };
+  watch?: {
+    [key: string]:
+      | WatchHandler<S>
+      | { handler: WatchHandler<S>; immediate?: boolean };
+  };
+  lifecycle?: StoreLifecycle<S>;
+}
+
+/** store 运行状态 */
+export interface StoreStatus {
+  /** 组件是否已 mounted */
+  mounted: boolean;
+  /** 组件当前是否处于活跃状态（keep-alive 场景下会变化） */
+  active: boolean;
 }
 
 export interface Store<S extends Record<string, any>> {
@@ -25,13 +54,12 @@ export interface Store<S extends Record<string, any>> {
   readonly $id: string;
   /** 原始响应式 state 对象 */
   readonly $state: S;
+  /** 挂载 / 活跃状态（响应式） */
+  readonly $status: StoreStatus;
 
   /** 批量更新 state（浅合并） */
   $patch(partial: Partial<S>): void;
   $patch(fn: (state: S) => Partial<S>): void;
-
-  /** 订阅 state 变化 */
-  $subscribe(callback: (newState: S) => void): () => void;
 
   /** 重置 state 到初始值 */
   $reset(): void;
@@ -42,8 +70,15 @@ export interface Store<S extends Record<string, any>> {
   /** 订阅事件，返回取消函数 */
   $on(event: string, handler: (payload?: any) => void): () => void;
 
-  /** 取消订阅事件 */
+  /** 取消订阅事件（不传 handler 则清除该事件所有订阅） */
   $off(event: string, handler?: (payload?: any) => void): void;
+
+  /**
+   * 绑定组件实例，自动挂载全部生命周期钩子并在 beforeDestroy 时自动销毁
+   * 必须在组件 created 中调用
+   * @returns store 自身，支持链式调用
+   */
+  bindTo(componentVm: Vue2ComponentInstance): this;
 
   /** 销毁 store，释放所有资源 */
   $destroy(): void;
@@ -57,19 +92,13 @@ export type PageStore<S extends Record<string, any>> = Store<S> & S;
  *
  * @param id - 唯一标识
  * @param options - store 配置
- * @returns useStore 函数，调用即获取 / 创建 store 实例
+ * @returns useStore(vm?) - 调用即获取 / 创建 store 实例；
+ *          传入组件实例时自动绑定生命周期（须在 created 中调用）
  */
 export declare function definePageStore<S extends Record<string, any>>(
   id: string,
   options: StoreOptions<S>
-): () => PageStore<S>;
+): (componentVm?: Vue2ComponentInstance) => PageStore<S>;
 
-/**
- * 将 store 的 state 属性转为 refs 对象
- */
-export declare function storeToRefs<S extends Record<string, any>>(
-  store: PageStore<S>
-): { [K in keyof S]: S[K] };
-
-/** Store 注册表 */
+/** Store 注册表（供调试 / devtools 使用） */
 export declare const storeRegistry: Map<string, PageStore<any>>;
