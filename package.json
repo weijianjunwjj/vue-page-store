@@ -15,7 +15,8 @@
   ],
   "scripts": {
     "build": "rollup -c rollup.config.mjs && cp src/index.d.ts dist/index.d.ts",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "release": "bash scripts/release.sh"
   },
   "peerDependencies": {
     "vue": "^2.6.0"
