@@ -1,5 +1,7 @@
 /**
- * vue-page-store - TypeScript 类型定义
+ * vue-page-store v0.3.0 - TypeScript 类型定义
+ *
+ * Page Scope Runtime for Vue 2.6
  */
 
 /** Vue 2 组件实例的最小接口（避免强依赖 vue 类型包） */
@@ -36,7 +38,13 @@ export interface StoreOptions<S extends Record<string, any>> {
   watch?: {
     [key: string]:
       | WatchHandler<S>
-      | { handler: WatchHandler<S>; immediate?: boolean };
+      | {
+          handler: WatchHandler<S>;
+          /** 默认 false（v0.3 breaking change） */
+          deep?: boolean;
+          /** 默认 false */
+          immediate?: boolean;
+        };
   };
   lifecycle?: StoreLifecycle<S>;
 }
@@ -56,12 +64,20 @@ export interface Store<S extends Record<string, any>> {
   readonly $state: S;
   /** 挂载 / 活跃状态（响应式） */
   readonly $status: StoreStatus;
+  /** store 是否已销毁（v0.3 公开属性，替代原 _disposed） */
+  readonly $disposed: boolean;
 
   /** 批量更新 state（浅合并） */
   $patch(partial: Partial<S>): void;
   $patch(fn: (state: S) => Partial<S>): void;
 
-  /** 重置 state 到初始值 */
+  /**
+   * 重置 state 到初始值
+   *
+   * v0.3 语义：完全恢复到 state() 的 shape
+   *   - 初始字段恢复为新鲜值
+   *   - 运行时动态新增的字段被移除
+   */
   $reset(): void;
 
   /** 发射事件（仅当前 store 作用域） */
@@ -74,7 +90,11 @@ export interface Store<S extends Record<string, any>> {
   $off(event: string, handler?: (payload?: any) => void): void;
 
   /**
-   * 绑定组件实例，自动挂载全部生命周期钩子并在 beforeDestroy 时自动销毁
+   * 绑定组件实例，自动挂载生命周期 + 自动 provide('pageStore', store)
+   *
+   * v0.3: 同一个 vm 重复绑定会被安全跳过
+   * 子组件 inject: ['pageStore'] 即可获取
+   *
    * 必须在组件 created 中调用
    * @returns store 自身，支持链式调用
    */
@@ -89,6 +109,9 @@ export type PageStore<S extends Record<string, any>> = Store<S> & S;
 
 /**
  * 定义页面级 Store
+ *
+ * 当前版本采用 id → singleton 实例模型：
+ *   同一个 id 在整个应用生命周期内对应唯一一个 store 实例。
  *
  * @param id - 唯一标识
  * @param options - store 配置
