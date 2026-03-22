@@ -191,6 +191,7 @@ function createStoreInstance(Vue, id, options) {
     if (!_listeners[event]) _listeners[event] = [];
     _listeners[event].push(handler);
     return function () {
+      if (!_listeners[event]) return;
       var idx = _listeners[event].indexOf(handler);
       if (idx > -1) _listeners[event].splice(idx, 1);
     };
