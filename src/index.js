@@ -1,18 +1,19 @@
 /*!
- * vue-page-store v0.3.0
+ * vue-page-store v0.4.0
  * (c) 2026 weijianjun
  * @license MIT
  */
 /**
- * vue-page-store 0.3.0 — Vue 2.6 Page Scope Runtime
+ * vue-page-store 0.4.0 — Vue 2.6 Page Scope Runtime
  *
  * 页面级作用域运行时容器：
- * state · getters · actions · watch · lifecycle · event bus
+ * source · state · getters · actions · watch · enter/leave · $setInterval · event bus
  *
- * 与 Vuex 的区分：
- *   Vuex        → 全局状态（用户信息、权限、路由等）
- *   pageStore   → 页面级作用域（仪表盘、漏斗详情等复杂页面内部状态）
- *                 页面销毁时 $destroy 即可回收，不污染全局
+ * v0.4 新增：
+ *   source     → 页面输入 / 原始返回，和业务 state 分开
+ *   enter/leave → 替换 v0.3 lifecycle，统一页面可见性语义
+ *   $setInterval → 页面级 timer 托管，leave 时自动清理
+ *   $loading    → async action 自动追踪 loading 状态
  *
  * @author weijianjun
  * @license MIT
@@ -34,11 +35,18 @@ function warn(msg) {
 
 function createStoreInstance(Vue, id, options) {
   var initialState = options.state();
+
+  // ====== v0.4 新增：source ======
+  var initialSource = (typeof options.source === 'function') ? options.source() : {};
+
   var getters = options.getters || {};
   var actions = options.actions || {};
-  var lifecycles = options.lifecycle || {};
 
-  // --- 用一个隐藏的 Vue 实例承载响应式 state + computed getters ---
+  // ====== v0.4 变更：enter/leave 替换 lifecycle ======
+  var enterHook = typeof options.enter === 'function' ? options.enter : null;
+  var leaveHook = typeof options.leave === 'function' ? options.leave : null;
+
+  // --- 用一个隐藏的 Vue 实例承载响应式 state + source + loading + computed getters ---
   var computedDefs = {};
   var store = { $disposed: false };
 
@@ -52,6 +60,8 @@ function createStoreInstance(Vue, id, options) {
     data: function () {
       return {
         $$state: initialState,
+        $$source: initialSource,     // v0.4 新增
+        $$loading: {},               // v0.4 新增
         $$status: {
           mounted: false,
           active: false
@@ -62,6 +72,8 @@ function createStoreInstance(Vue, id, options) {
   });
 
   var rawState = vm.$data.$$state;
+  var rawSource = vm.$data.$$source;   // v0.4 新增
+  var rawLoading = vm.$data.$$loading; // v0.4 新增
   var rawStatus = vm.$data.$$status;
 
   // ====== state —— 代理到 vm.$$state ======
@@ -80,6 +92,12 @@ function createStoreInstance(Vue, id, options) {
     });
   });
 
+  // ====== v0.4 新增：$source —— 代理到 vm.$$source ======
+  store.$source = rawSource;
+
+  // ====== v0.4 新增：$loading —— 代理到 vm.$$loading ======
+  store.$loading = rawLoading;
+
   // ====== getters —— 代理到 vm computed ======
   Object.keys(getters).forEach(function (key) {
     Object.defineProperty(store, key, {
@@ -88,9 +106,39 @@ function createStoreInstance(Vue, id, options) {
     });
   });
 
-  // ====== actions ======
+  // ====== actions —— v0.4 变更：自动增强 async action ======
+  var _loadingCounts = {};  // 并发计数器，防止先返回的 finally 提前关 loading
+
+  function finishLoading(key) {
+    _loadingCounts[key]--;
+    if (_loadingCounts[key] <= 0) {
+      _loadingCounts[key] = 0;
+      Vue.set(rawLoading, key, false);
+    }
+  }
+
   Object.keys(actions).forEach(function (key) {
-    store[key] = actions[key].bind(store);
+    var originalFn = actions[key];
+    var boundFn = originalFn.bind(store);
+
+    store[key] = function () {
+      var result = boundFn.apply(null, arguments);
+
+      // 检测是否返回 Promise，如果是则自动追踪 loading
+      if (result && typeof result.then === 'function') {
+        if (!_loadingCounts[key]) _loadingCounts[key] = 0;
+        _loadingCounts[key]++;
+        Vue.set(rawLoading, key, true);
+
+        var tracked = Promise.resolve(result);
+        tracked.then(
+          function () { finishLoading(key); },
+          function () { finishLoading(key); }
+        );
+      }
+
+      return result;
+    };
   });
 
   // ====== watch —— 声明式副作用，生命周期自动回收 ======
@@ -106,7 +154,6 @@ function createStoreInstance(Vue, id, options) {
       watchOpts = {};
     } else {
       handler = def.handler;
-      // v0.3: deep 默认 false，需要显式开启
       watchOpts = {};
       if (def.deep) watchOpts.deep = true;
       if (def.immediate) watchOpts.immediate = true;
@@ -125,14 +172,24 @@ function createStoreInstance(Vue, id, options) {
     vm.$watch(expr, handler.bind(store), watchOpts);
   });
 
-  // ====== 内置方法 ======
+  // ====== 内置属性 ======
   store.$state = rawState;
   store.$status = rawStatus;
   store.$id = id;
 
+  // v0.4 新增：$vm 逃生口，只读，bindTo 时通过内部 setter 赋值
+  var _vm_ref = null;
+  Object.defineProperty(store, '$vm', {
+    enumerable: true,
+    configurable: false,
+    get: function () { return _vm_ref; },
+    set: function () {
+      warn('$vm 是只读属性，不允许业务侧重写');
+    },
+  });
+
   /**
    * 批量更新 state（浅合并语义）
-   * @param {Object|Function} partial - 要合并的对象，或 (state) => Object 函数
    */
   store.$patch = function (partial) {
     if (store.$disposed) {
@@ -146,24 +203,32 @@ function createStoreInstance(Vue, id, options) {
   };
 
   /**
-   * 重置 state 到初始值
+   * 重置 state 和 source 到初始值
    *
-   * v0.3 语义：完全恢复到 state() 的 shape
+   * v0.4 语义：同时重置 state 和 source
    *   - 初始字段恢复为新鲜值
    *   - 运行时动态新增的字段被移除
    */
   store.$reset = function () {
-    var fresh = options.state();
-
-    // 1. 恢复初始字段
-    Object.keys(fresh).forEach(function (key) {
-      Vue.set(rawState, key, fresh[key]);
+    // 重置 state
+    var freshState = options.state();
+    Object.keys(freshState).forEach(function (key) {
+      Vue.set(rawState, key, freshState[key]);
+    });
+    Object.keys(rawState).forEach(function (key) {
+      if (!(key in freshState)) {
+        Vue.delete(rawState, key);
+      }
     });
 
-    // 2. 删除不在初始 shape 中的字段
-    Object.keys(rawState).forEach(function (key) {
-      if (!(key in fresh)) {
-        Vue.delete(rawState, key);
+    // v0.4 新增：重置 source
+    var freshSource = (typeof options.source === 'function') ? options.source() : {};
+    Object.keys(freshSource).forEach(function (key) {
+      Vue.set(rawSource, key, freshSource[key]);
+    });
+    Object.keys(rawSource).forEach(function (key) {
+      if (!(key in freshSource)) {
+        Vue.delete(rawSource, key);
       }
     });
   };
@@ -171,22 +236,11 @@ function createStoreInstance(Vue, id, options) {
   // ====== 内置事件总线（页面作用域隔离通信） ======
   var _listeners = {};
 
-  /**
-   * 发射事件（仅当前 store 作用域内）
-   * @param {string} event - 事件名
-   * @param {*} payload - 事件数据
-   */
   store.$emit = function (event, payload) {
     var fns = _listeners[event];
     if (fns) fns.slice().forEach(function (fn) { fn(payload); });
   };
 
-  /**
-   * 订阅事件
-   * @param {string} event - 事件名
-   * @param {Function} handler - 处理函数
-   * @returns {Function} 取消订阅函数
-   */
   store.$on = function (event, handler) {
     if (!_listeners[event]) _listeners[event] = [];
     _listeners[event].push(handler);
@@ -197,11 +251,6 @@ function createStoreInstance(Vue, id, options) {
     };
   };
 
-  /**
-   * 取消订阅指定事件的所有 handler，或指定 handler
-   * @param {string} event - 事件名
-   * @param {Function} [handler] - 可选，指定取消某个 handler
-   */
   store.$off = function (event, handler) {
     if (!_listeners[event]) return;
     if (handler) {
@@ -212,62 +261,124 @@ function createStoreInstance(Vue, id, options) {
     }
   };
 
-  // ====== 页面生命周期 ======
+  // ====== v0.4 新增：$setInterval —— 页面级 timer 托管 ======
+  var _intervals = [];
 
-  /** 触发生命周期钩子 + 广播事件 */
-  function runHook(name, payload) {
-    var hook = lifecycles[name];
-    if (typeof hook === 'function') {
-      hook.call(store, payload);
+  /**
+   * 注册页面级 interval
+   * leave 时自动清理，$destroy 时兜底清理
+   *
+   * @param {Function} fn - 定时执行的函数
+   * @param {number} delay - 间隔毫秒数
+   * @returns {Function} stop - 手动停止函数
+   */
+  store.$setInterval = function (fn, delay) {
+    var timerId = setInterval(fn, delay);
+    var entry = { id: timerId, stopped: false };
+    _intervals.push(entry);
+
+    var stop = function () {
+      if (entry.stopped) return;
+      clearInterval(entry.id);
+      entry.stopped = true;
+      var idx = _intervals.indexOf(entry);
+      if (idx > -1) _intervals.splice(idx, 1);
+    };
+
+    return stop;
+  };
+
+  /** 清理所有已注册的 interval */
+  function clearAllIntervals() {
+    _intervals.forEach(function (entry) {
+      if (!entry.stopped) {
+        clearInterval(entry.id);
+        entry.stopped = true;
+      }
+    });
+    _intervals.length = 0;
+  }
+
+  // ====== v0.4 变更：enter/leave 页面生命周期 ======
+
+  // keep-alive 防重复 enter 标记
+  var _entered = false;
+
+  function runEnter() {
+    if (_entered) return;
+    _entered = true;
+    rawStatus.mounted = true;
+    rawStatus.active = true;
+    if (enterHook) {
+      enterHook.call(store);
     }
-    store.$emit('page:' + name, payload);
+    store.$emit('page:enter');
+  }
+
+  function runLeave() {
+    if (!_entered) return;
+    // 先清理 interval，再执行用户的 leave hook
+    clearAllIntervals();
+    _entered = false;
+    rawStatus.active = false;
+    if (leaveHook) {
+      leaveHook.call(store);
+    }
+    store.$emit('page:leave');
   }
 
   // ====== bindTo 去重标记 ======
+  // WeakSet 优先；fallback 用数组（IE9 等老环境）
   var _boundVms = typeof WeakSet !== 'undefined' ? new WeakSet() : null;
+  var _boundVmsFallback = _boundVms ? null : [];
+
+  function hasBoundVm(vm) {
+    if (_boundVms) return _boundVms.has(vm);
+    return _boundVmsFallback.indexOf(vm) > -1;
+  }
+
+  function addBoundVm(vm) {
+    if (_boundVms) { _boundVms.add(vm); return; }
+    _boundVmsFallback.push(vm);
+  }
 
   /**
-   * 绑定到组件实例，自动挂载生命周期 + 自动 provide
+   * 绑定到组件实例
    *
-   * v0.3:
-   *   - 同一个 vm 重复绑定会被安全跳过
-   *   - 自动 provide('pageStore', store)，子组件 inject: ['pageStore'] 即可获取
-   *
-   * 必须在 created 中调用（mounted 之前），否则 hook:mounted 捕获不到。
-   *
-   * @param {Vue} componentVm - 组件实例（通常传 this）
-   * @returns {Object} store - 支持链式调用
+   * v0.4 变更：
+   *   - 挂载 $vm 引用
+   *   - 使用 enter/leave 替代 v0.3 lifecycle
+   *   - 自动 provide('pageStore', store)
    */
   store.bindTo = function (componentVm) {
     if (store.$disposed) return store;
 
     // 去重：同一个 vm 只绑定一次
-    if (_boundVms) {
-      if (_boundVms.has(componentVm)) return store;
-      _boundVms.add(componentVm);
-    }
+    if (hasBoundVm(componentVm)) return store;
+    addBoundVm(componentVm);
+
+    // v0.4 新增：挂载 $vm 引用（通过内部变量，外部只读）
+    _vm_ref = componentVm;
 
     // 自动 provide —— 子组件 inject: ['pageStore'] 即可获取
     var provided = componentVm._provided || (componentVm._provided = {});
     provided['pageStore'] = store;
 
+    // v0.4 变更：enter/leave 替代 lifecycle
     componentVm.$on('hook:mounted', function () {
-      rawStatus.mounted = true;
-      rawStatus.active = true;
-      runHook('mount');
+      runEnter();
     });
 
     componentVm.$on('hook:activated', function () {
-      rawStatus.active = true;
-      runHook('activate');
+      runEnter();
     });
 
     componentVm.$on('hook:deactivated', function () {
-      rawStatus.active = false;
-      runHook('deactivate');
+      runLeave();
     });
 
     componentVm.$on('hook:beforeDestroy', function () {
+      runLeave();
       store.$destroy();
     });
 
@@ -277,14 +388,18 @@ function createStoreInstance(Vue, id, options) {
   // ====== $destroy ======
 
   /**
-   * 销毁 store —— 触发 unmount 钩子、清空事件、销毁 vm、移除注册
+   * 销毁 store
+   *
+   * v0.4 变更：兜底清理 interval
    */
   store.$destroy = function () {
     if (store.$disposed) return;
 
     rawStatus.mounted = false;
     rawStatus.active = false;
-    runHook('unmount');
+
+    // 兜底清理 interval（正常流程 leave 已经清过，这里防遗漏）
+    clearAllIntervals();
 
     store.$disposed = true;
     Object.keys(_listeners).forEach(function (key) { delete _listeners[key]; });
@@ -300,45 +415,10 @@ function createStoreInstance(Vue, id, options) {
 /**
  * 定义页面级 Store
  *
- * 当前版本采用 id → singleton 实例模型：
- *   同一个 id 在整个应用生命周期内对应唯一一个 store 实例。
- *   适用于单页单作用域 / keep-alive 缓存场景。
- *   多实例 / keyed instance 将在未来版本支持。
- *
- * @param {string} id - 唯一标识
- * @param {Object} options - { state, getters, actions, watch, lifecycle }
- * @returns {Function} useStore(vm?) - 调用即获取 / 创建 store 实例
- *
- * @example
- * var useFunnelStore = definePageStore('funnelDetail', {
- *   state: function () { return { filters: {}, loading: false }; },
- *   getters: {
- *     isReady: function () { return !this.loading; }
- *   },
- *   actions: {
- *     fetchData: async function () { ... }
- *   },
- *   watch: {
- *     // v0.3: 默认 shallow watch，需要 deep 请显式声明
- *     'filters': { handler: function (v) { this.fetchData(); }, deep: true }
- *   },
- *   lifecycle: {
- *     mount:    function () { this.fetchData(); },
- *     unmount:  function () { console.log('bye'); },
- *     activate: function () { this.needRefresh && this.fetchData(); }
- *   }
- * });
- *
- * // 页面组件（created 里传 this，自动绑定生命周期 + 自动 provide + 自动销毁）
- * created() {
- *   this.pageStore = useFunnelStore(this);
- * }
- *
- * // 子组件（inject 即可获取，不需要 import store 文件）
- * inject: ['pageStore']
- *
- * // 不需要 lifecycle 时，不传参数，和 0.1.0 完全一样
- * this.pageStore = useFunnelStore();
+ * v0.4 变更：
+ *   - options 新增 source、enter、leave
+ *   - options 移除 lifecycle
+ *   - actions 中的 async 函数自动追踪 $loading
  */
 function definePageStore(id, options) {
   // 入参校验
@@ -375,6 +455,7 @@ function definePageStore(id, options) {
     return store;
   };
 }
-var index = { definePageStore, storeRegistry };
+
+var index = { definePageStore: definePageStore, storeRegistry: storeRegistry };
 
 export { index as default, definePageStore, storeRegistry };
