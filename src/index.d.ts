@@ -1,5 +1,5 @@
 /**
- * vue-page-store v0.4.0 - TypeScript 类型定义
+ * vue-page-store v0.4.1 - TypeScript 类型定义
  *
  * Page Scope Runtime for Vue 2.6
  */
@@ -48,6 +48,13 @@ export interface StoreOptions<
           immediate?: boolean;
         };
   };
+
+  /**
+   * store 创建后一次性调用（v0.4.1 新增）
+   * bindTo 之后调用，$vm 已可用
+   * 适合拉字典、注册事件监听、从 localStorage 恢复配置、初始化 WebSocket
+   */
+  init?: (this: PageStore<S, Src>) => void;
 
   /**
    * 页面进入可见/可交互状态（v0.4 新增，替换 v0.3 lifecycle）
@@ -129,6 +136,8 @@ export type PageStore<
  *   - options 新增 source、enter、leave
  *   - options 移除 lifecycle（breaking change）
  *   - async action 自动追踪 $loading
+ * v0.4.1 变更：
+ *   - options 新增 init（bindTo 之后一次性调用）
  */
 export declare function definePageStore<
   S extends Record<string, any>,

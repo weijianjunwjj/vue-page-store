@@ -1,6 +1,6 @@
 # vue-page-store
 
-> Vue 2.6 页面级作用域运行时容器 —— source、state、getters、actions、watch、enter/leave，一个页面作用域全收。
+> Vue 2.6 页面级作用域运行时容器 —— source、state、getters、actions、watch、init/enter/leave，一个页面作用域全收。
 
 ## 它是什么
 
@@ -13,6 +13,7 @@
 - **getters** — 派生计算
 - **actions** — 业务逻辑
 - **watch** — 声明式副作用
+- **init** — 一次性初始化（拉字典、注册事件监听等）
 - **enter / leave** — 页面可见性生命周期
 - **$setInterval** — 页面级定时器托管
 - **event bus** — 页面内作用域通信
@@ -22,7 +23,7 @@
 ## 它不是什么
 
 - **不是 Vuex / Pinia 替代品** — 全局状态（用户信息、权限、路由）请继续用 Vuex / Pinia
-- **不是全局状态管理方案** — 它的作用域是“页面”，不是“应用”
+- **不是全局状态管理方案** — 它的作用域是"页面"，不是"应用"
 - **不是大而全的框架** — 它只解决复杂页面的页面层状态编排
 
 | | Vuex / Pinia | vue-page-store |
@@ -109,6 +110,13 @@ export const useOrderStore = definePageStore('orderList', {
     }
   },
 
+  // 只执行一次：拉下拉框选项、注册事件监听等
+  init() {
+    this.loadDictOptions()
+    this.$on('child:refresh', () => this.search())
+  },
+
+  // 每次页面可见时执行
   enter() {
     this.$source.query = this.$vm.$route.query
     this.search()
@@ -129,7 +137,7 @@ import { useOrderStore } from './stores/order-list'
 
 export default {
   created() {
-    // 传入 this → 自动绑定 enter/leave + 自动 provide + 页面销毁时自动回收
+    // 传入 this → 自动绑定 init/enter/leave + 自动 provide + 页面销毁时自动回收
     this.pageStore = useOrderStore(this)
   }
 }
@@ -165,6 +173,7 @@ export default {
 | `getters` | `{ [key]: function }` | 派生计算，`this` 指向 store |
 | `actions` | `{ [key]: function }` | 业务方法，`this` 指向 store |
 | `watch` | `{ [path]: handler \| options }` | 声明式 watcher，支持 dot-path |
+| `init` | `function` | store 创建后一次性调用，`$vm` 已可用。适合拉字典、注册事件监听 |
 | `enter` | `function` | 页面进入可见 / 可交互状态时触发 |
 | `leave` | `function` | 页面离开可见 / 可交互状态时触发 |
 
@@ -207,7 +216,7 @@ watch: {
 
 ## source 与 state
 
-v0.4 引入了 `source`，用于把“页面输入 / 原始返回”和“业务状态”分开。
+v0.4 引入了 `source`，用于把"页面输入 / 原始返回"和"业务状态"分开。
 
 ### 推荐分工
 
@@ -233,14 +242,52 @@ state: () => ({
 - getters 可以同时基于 `this.$source` 和 `this.xxx` 计算
 - `$reset()` 时 source / state 一起恢复，更清晰
 
-## enter / leave
+## init / enter / leave
 
 v0.4 用 `enter / leave` 替换了 v0.3 的 `lifecycle.mount / unmount / activate / deactivate`。
 
+v0.4.1 新增 `init`，用于 store 创建后的一次性初始化。
+
 ### 语义
 
+- **init**：store 创建后一次性调用，`$vm` 已可用，DOM 未就绪
 - **enter**：页面进入可见 / 可交互状态
 - **leave**：页面离开可见 / 可交互状态
+
+### 执行时序
+
+```
+created() 开始
+  └→ useStore(this)
+       └→ createStoreInstance()   ← state/source/getters/actions 就绪
+       └→ bindTo(this)            ← $vm 赋值
+       └→ ★ init()               ← $vm 可用，只执行一次
+  └→ created() 剩余代码
+mounted()
+  └→ ★ enter()                   ← DOM 就绪，每次可见都执行
+
+--- keep-alive 切走 ---
+deactivated()
+  └→ clearAllIntervals()
+  └→ ★ leave()
+
+--- keep-alive 切回 ---
+activated()
+  └→ ★ enter()                   ← 重新开轮询、刷数据
+
+--- 页面销毁 ---
+beforeDestroy()
+  └→ ★ leave()（如果还没 leave）
+  └→ $destroy()
+```
+
+### 分工原则
+
+| 钩子 | 执行次数 | $vm | DOM | 典型场景 |
+|---|---|---|---|---|
+| `init` | 一次 | ✅ | ❌ | 拉下拉框选项、注册事件监听、从 localStorage 恢复配置、初始化 WebSocket |
+| `enter` | 每次可见 | ✅ | ✅ | 读路由参数、刷列表数据、开轮询 |
+| `leave` | 每次离开 | ✅ | ✅ | 通常不需要写，interval 已自动清理 |
 
 ### keep-alive 行为
 
@@ -249,14 +296,26 @@ v0.4 用 `enter / leave` 替换了 v0.3 的 `lifecycle.mount / unmount / activat
 - `deactivated` → `leave`
 - `beforeDestroy` → 如果当前还没 leave，先 leave，再 `$destroy`
 
-### 适合放在 enter / leave 里的逻辑
+### 适合放在 init 里的逻辑
 
-- 首屏加载
-- 根据 `$route` 初始化 source / state
+- 拉下拉框 / 字典选项（只需要一次）
+- 注册 `$on` 监听 store 内部事件
+- 从 localStorage 恢复上次的筛选条件
+- 初始化 WebSocket / EventSource 连接
+- 根据用户权限裁剪 columns / 按钮配置
+
+### 适合放在 enter 里的逻辑
+
+- 根据 `$route` 初始化 source / state（keep-alive 切回时路由参数可能变了）
+- 首屏加载 / 刷新列表数据
 - 启动页面轮询
-- 页面离开时做收尾逻辑
 
 ```js
+init() {
+  this.loadDictOptions()
+  this.$on('child:refresh', () => this.search())
+},
+
 enter() {
   this.$source.query = this.$vm.$route.query
   this.search()
@@ -385,7 +444,7 @@ state: () => ({
 - 仪表盘页面 —— 多模块共享筛选条件、加载状态
 - 漏斗 / 留存等分析详情页 —— 复杂交互 + 异步数据 + 页面可见性管理
 - 大型配置页 —— 多 tab / 多步骤表单的状态统一管理
-- keep-alive 业务页 —— 需要 enter / leave 感知的页面
+- keep-alive 业务页 —— 需要 init / enter / leave 感知的页面
 - 微前端子应用 —— 页面作用域隔离，不污染宿主全局状态
 
 ## 不适用场景
@@ -427,7 +486,7 @@ storeRegistry.forEach((store, id) => {
 
 ### Breaking Changes
 
-**1. `lifecycle` 被移除，改为 `enter / leave`**
+**1. `lifecycle` 被移除，改为 `init` / `enter` / `leave`**
 
 v0.3.x：
 
@@ -440,16 +499,23 @@ lifecycle: {
 }
 ```
 
-v0.4.0：
+v0.4.x：
 
 ```js
-enter() {},
-leave() {}
+init() {
+  // 只执行一次的初始化（拉字典、注册事件等）
+},
+enter() {
+  // 每次可见时执行（替代 mount + activate）
+},
+leave() {
+  // 每次离开时执行（替代 deactivate + unmount）
+}
 ```
 
 迁移关系：
 
-- `lifecycle.mount` → `enter`
+- `lifecycle.mount` → `enter`（如果包含一次性逻辑，拆到 `init`）
 - `lifecycle.unmount` → `leave`
 - `lifecycle.activate` → `enter`
 - `lifecycle.deactivate` → `leave`
@@ -465,10 +531,11 @@ v0.4.0 中：
 ### New Features
 
 - `source`：页面输入 / 原始返回与业务状态分离
+- `init`：store 创建后一次性钩子，`$vm` 已可用（v0.4.1）
 - `enter / leave`：更简单的页面可见性生命周期
 - `$setInterval()`：页面级 interval 托管
 - `$loading.xxx`：返回 Promise 的 action 自动追踪 loading
-- `$vm`：只读逃生口，可在 enter 中访问 `$route / $router`
+- `$vm`：只读逃生口，可在 init / enter 中访问 `$route / $router`
 
 ## Roadmap
 

@@ -1,19 +1,22 @@
 /*!
- * vue-page-store v0.4.0
+ * vue-page-store v0.4.1
  * (c) 2026 weijianjun
  * @license MIT
  */
 /**
- * vue-page-store 0.4.0 — Vue 2.6 Page Scope Runtime
+ * vue-page-store 0.4.1 — Vue 2.6 Page Scope Runtime
  *
  * 页面级作用域运行时容器：
- * source · state · getters · actions · watch · enter/leave · $setInterval · event bus
+ * source · state · getters · actions · watch · init/enter/leave · $setInterval · event bus
  *
  * v0.4 新增：
  *   source     → 页面输入 / 原始返回，和业务 state 分开
  *   enter/leave → 替换 v0.3 lifecycle，统一页面可见性语义
  *   $setInterval → 页面级 timer 托管，leave 时自动清理
  *   $loading    → async action 自动追踪 loading 状态
+ *
+ * v0.4.1 新增：
+ *   init       → store 创建后一次性初始化钩子，$vm 已可用
  *
  * @author weijianjun
  * @license MIT
@@ -419,6 +422,8 @@ function createStoreInstance(Vue, id, options) {
  *   - options 新增 source、enter、leave
  *   - options 移除 lifecycle
  *   - actions 中的 async 函数自动追踪 $loading
+ * v0.4.1 变更：
+ *   - options 新增 init（bindTo 之后一次性调用）
  */
 function definePageStore(id, options) {
   // 入参校验
@@ -452,6 +457,12 @@ function definePageStore(id, options) {
     var store = createStoreInstance(_Vue, id, options);
     storeRegistry.set(id, store);
     if (componentVm) store.bindTo(componentVm);
+
+    // v0.4.1 新增：init 钩子 —— bindTo 之后调用，$vm 已可用
+    if (typeof options.init === 'function') {
+      options.init.call(store);
+    }
+
     return store;
   };
 }
