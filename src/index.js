@@ -1,13 +1,13 @@
 /*!
- * vue-page-store v0.4.1
+ * vue-page-store v0.5.0
  * (c) 2026 weijianjun
  * @license MIT
  */
 /**
- * vue-page-store 0.4.1 — Vue 2.6 Page Scope Runtime
+ * vue-page-store 0.5.0 — Vue 2.6 Page Scope Runtime
  *
  * 页面级作用域运行时容器：
- * source · state · getters · actions · watch · init/enter/leave · $setInterval · event bus
+ * source · state · getters · actions · watch · init/enter/leave · $setInterval · event bus · plugin
  *
  * v0.4 新增：
  *   source     → 页面输入 / 原始返回，和业务 state 分开
@@ -18,12 +18,14 @@
  * v0.4.1 新增：
  *   init       → store 创建后一次性初始化钩子，$vm 已可用
  *
+ * v0.5 新增：
+ *   plugin     → registerPlugin 注册外部扩展，声明字段 + 生命周期钩子
+ *
  * @author weijianjun
  * @license MIT
  */
 
-// Store 注册表（导出供调试 / devtools 使用）
-var storeRegistry = new Map();
+import Vue from 'vue';
 
 // ====== dev-only warning ======
 var isDev = typeof process !== 'undefined'
@@ -34,6 +36,47 @@ function warn(msg) {
   if (isDev) {
     console.warn('[vue-page-store] ' + msg);
   }
+}
+
+// Store 注册表（导出供调试 / devtools 使用）
+var storeRegistry = new Map();
+
+// v0.5 新增：dev 环境自动挂到 window，方便控制台调试
+if (isDev && typeof window !== 'undefined') {
+  window.__VUE_PAGE_STORE__ = {
+    registry: storeRegistry,
+    get stores() {
+      var result = {};
+      storeRegistry.forEach(function (s, id) { result[id] = s; });
+      return result;
+    },
+  };
+}
+
+// ====== v0.5 新增：plugin 机制 ======
+var _plugins = [];
+
+/**
+ * 注册全局 plugin
+ *
+ * plugin.name 同时作为 options 字段匹配键：
+ *   当 definePageStore options 中存在 options[plugin.name] 时，
+ *   page-store 会调用 plugin.install(store, fieldValue, { Vue })
+ *
+ * install 可返回 { enter, leave, destroy } 生命周期钩子
+ */
+function registerPlugin(plugin) {
+  if (!plugin || typeof plugin.name !== 'string') {
+    throw new Error('[vue-page-store] plugin 需要一个 name 属性');
+  }
+  if (typeof plugin.install !== 'function') {
+    throw new Error('[vue-page-store] plugin "' + plugin.name + '" 需要一个 install 方法');
+  }
+  if (_plugins.some(function (p) { return p.name === plugin.name; })) {
+    warn('plugin "' + plugin.name + '" 已注册，跳过重复注册');
+    return;
+  }
+  _plugins.push(plugin);
 }
 
 function createStoreInstance(Vue, id, options) {
@@ -48,6 +91,9 @@ function createStoreInstance(Vue, id, options) {
   // ====== v0.4 变更：enter/leave 替换 lifecycle ======
   var enterHook = typeof options.enter === 'function' ? options.enter : null;
   var leaveHook = typeof options.leave === 'function' ? options.leave : null;
+
+  // ====== v0.5 新增：plugin hooks 闭包存储（由 install 填充） ======
+  var _pluginHooks = [];
 
   // --- 用一个隐藏的 Vue 实例承载响应式 state + source + loading + computed getters ---
   var computedDefs = {};
@@ -316,6 +362,8 @@ function createStoreInstance(Vue, id, options) {
       enterHook.call(store);
     }
     store.$emit('page:enter');
+    // v0.5: plugin enter hooks
+    _pluginHooks.forEach(function (h) { if (h.enter) h.enter(); });
   }
 
   function runLeave() {
@@ -328,6 +376,8 @@ function createStoreInstance(Vue, id, options) {
       leaveHook.call(store);
     }
     store.$emit('page:leave');
+    // v0.5: plugin leave hooks
+    _pluginHooks.forEach(function (h) { if (h.leave) h.leave(); });
   }
 
   // ====== bindTo 去重标记 ======
@@ -394,6 +444,7 @@ function createStoreInstance(Vue, id, options) {
    * 销毁 store
    *
    * v0.4 变更：兜底清理 interval
+   * v0.5 变更：调用 plugin destroy 钩子
    */
   store.$destroy = function () {
     if (store.$disposed) return;
@@ -404,6 +455,9 @@ function createStoreInstance(Vue, id, options) {
     // 兜底清理 interval（正常流程 leave 已经清过，这里防遗漏）
     clearAllIntervals();
 
+    // v0.5: plugin destroy hooks
+    _pluginHooks.forEach(function (h) { if (h.destroy) h.destroy(); });
+
     store.$disposed = true;
     Object.keys(_listeners).forEach(function (key) { delete _listeners[key]; });
     vm.$destroy();
@@ -411,6 +465,15 @@ function createStoreInstance(Vue, id, options) {
   };
 
   store._vm = vm;
+
+  // ====== v0.5 新增：plugin 安装 ======
+  // 放在最后，此时 store 的 state/getters/actions/$源数据/$setInterval 等全部就绪
+  _plugins.forEach(function (plugin) {
+    var fieldValue = options[plugin.name];
+    if (fieldValue === undefined) return;
+    var hooks = plugin.install(store, fieldValue, { Vue: Vue });
+    if (hooks) _pluginHooks.push(hooks);
+  });
 
   return store;
 }
@@ -424,6 +487,8 @@ function createStoreInstance(Vue, id, options) {
  *   - actions 中的 async 函数自动追踪 $loading
  * v0.4.1 变更：
  *   - options 新增 init（bindTo 之后一次性调用）
+ * v0.5 变更：
+ *   - options 中注册过的 plugin.name 字段会被交给对应 plugin 处理
  */
 function definePageStore(id, options) {
   // 入参校验
@@ -434,24 +499,13 @@ function definePageStore(id, options) {
     throw new Error('[vue-page-store] definePageStore("' + id + '") 需要 state 为函数');
   }
 
-  var _Vue = null;
+  var _Vue = Vue;
 
   return function useStore(componentVm) {
     if (storeRegistry.has(id)) {
       var existing = storeRegistry.get(id);
       if (componentVm) existing.bindTo(componentVm);
       return existing;
-    }
-
-    if (!_Vue) {
-      try {
-        _Vue = require('vue');
-        if (_Vue.default) _Vue = _Vue.default;
-      } catch (e) {
-        throw new Error(
-          '[vue-page-store] 无法自动获取 Vue，请确保 vue 已安装'
-        );
-      }
     }
 
     var store = createStoreInstance(_Vue, id, options);
@@ -467,6 +521,10 @@ function definePageStore(id, options) {
   };
 }
 
-var index = { definePageStore: definePageStore, storeRegistry: storeRegistry };
+var index = {
+  definePageStore: definePageStore,
+  registerPlugin: registerPlugin,
+  storeRegistry: storeRegistry
+};
 
-export { index as default, definePageStore, storeRegistry };
+export { index as default, definePageStore, registerPlugin, storeRegistry };

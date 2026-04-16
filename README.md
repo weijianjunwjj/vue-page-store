@@ -17,6 +17,7 @@
 - **enter / leave** — 页面可见性生命周期
 - **$setInterval** — 页面级定时器托管
 - **event bus** — 页面内作用域通信
+- **plugin** — 外部扩展机制（v0.5 新增）
 
 页面离开时可以自动清理页面级定时器，页面销毁时 `$destroy` 一键回收，不污染全局。
 
@@ -176,6 +177,11 @@ export default {
 | `init` | `function` | store 创建后一次性调用，`$vm` 已可用。适合拉字典、注册事件监听 |
 | `enter` | `function` | 页面进入可见 / 可交互状态时触发 |
 | `leave` | `function` | 页面离开可见 / 可交互状态时触发 |
+| *其它字段* | *any* | 注册过的 plugin 可声明自己的字段（见 [Plugin](#plugin)） |
+
+### `registerPlugin(plugin)` *(v0.5 新增)*
+
+注册全局插件，详见 [Plugin](#plugin) 节。
 
 ### Store 实例属性与方法
 
@@ -260,24 +266,29 @@ v0.4.1 新增 `init`，用于 store 创建后的一次性初始化。
 created() 开始
   └→ useStore(this)
        └→ createStoreInstance()   ← state/source/getters/actions 就绪
+       └→ plugin.install()        ← v0.5：plugin 安装（$vm 尚未绑定）
        └→ bindTo(this)            ← $vm 赋值
        └→ ★ init()               ← $vm 可用，只执行一次
   └→ created() 剩余代码
 mounted()
   └→ ★ enter()                   ← DOM 就绪，每次可见都执行
+  └→ plugin.enter()              ← v0.5：plugin enter 钩子
 
 --- keep-alive 切走 ---
 deactivated()
   └→ clearAllIntervals()
   └→ ★ leave()
+  └→ plugin.leave()              ← v0.5：plugin leave 钩子
 
 --- keep-alive 切回 ---
 activated()
   └→ ★ enter()                   ← 重新开轮询、刷数据
+  └→ plugin.enter()
 
 --- 页面销毁 ---
 beforeDestroy()
   └→ ★ leave()（如果还没 leave）
+  └→ plugin.destroy()            ← v0.5：plugin destroy 钩子
   └→ $destroy()
 ```
 
@@ -419,6 +430,128 @@ state: () => ({
 })
 ```
 
+## Plugin
+
+*v0.5 新增。* Plugin 机制让外部库可以给 `definePageStore` options 增加**新字段**并消费它，同时挂钩 enter / leave / destroy 生命周期——而不需要修改 page-store 本身。
+
+> 典型场景：`vue-page-runtime`（请求编排）、`vue-page-persist`（状态持久化）、devtools 扩展。
+
+### 协议
+
+Plugin 是一个对象，包含 `name` 和 `install`：
+
+```js
+{
+  name: 'tasks',                          // 同时作为 options 字段匹配键
+  install(store, fieldValue, { Vue }) {   // fieldValue === options.tasks
+    // 初始化 plugin 自己的逻辑
+    return {
+      enter()   { /* page enter 后调用 */ },
+      leave()   { /* page leave 后调用 */ },
+      destroy() { /* store 销毁时调用 */ },
+    }
+  }
+}
+```
+
+- **匹配规则**：`options[plugin.name] !== undefined` 才会调用 `install`。没有声明字段的 store 完全不受影响。
+- **install 时机**：store 创建末尾，state / getters / actions / $source / $setInterval / $emit 等全部就绪。`$vm` 此时**尚未**绑定。
+- **返回值**：可选 `{ enter?, leave?, destroy? }`。不需要钩子可以不返回。
+
+### 注册
+
+全局注册一次即可：
+
+```js
+// main.js
+import { registerPlugin } from 'vue-page-store'
+import taskPlugin from 'vue-page-runtime/plugin'
+
+registerPlugin(taskPlugin)
+```
+
+之后正常写 store，声明插件字段：
+
+```js
+import { definePageStore } from 'vue-page-store'   // 入口不变
+
+definePageStore('order', {
+  state: () => ({ /* ... */ }),
+
+  // page-store 不认识这个字段，但会递给注册过的 plugin
+  tasks: {
+    fetchUser: {
+      trigger: 'enter',
+      async run() { return api.getUser(this.$vm.$route.params.id) },
+    },
+    fetchOrders: {
+      deps: ['fetchUser'],
+      async run() { /* ... */ },
+    },
+  },
+})
+```
+
+### 写一个 plugin
+
+最小示例——一个把 `persist` 字段声明持久化到 localStorage 的插件：
+
+```js
+const persistPlugin = {
+  name: 'persist',
+
+  install(store, fieldValue /* options.persist */, { Vue }) {
+    const { key, paths } = fieldValue
+
+    // 恢复
+    try {
+      const saved = JSON.parse(localStorage.getItem(key) || '{}')
+      store.$patch(saved)
+    } catch (e) {}
+
+    // 持久化 —— 监听指定字段
+    const stopWatchers = paths.map(p =>
+      store._vm.$watch(
+        () => store[p],
+        (val) => {
+          const cur = JSON.parse(localStorage.getItem(key) || '{}')
+          cur[p] = val
+          localStorage.setItem(key, JSON.stringify(cur))
+        }
+      )
+    )
+
+    return {
+      destroy() {
+        stopWatchers.forEach(stop => stop())
+      }
+    }
+  }
+}
+
+registerPlugin(persistPlugin)
+```
+
+使用：
+
+```js
+definePageStore('page', {
+  state: () => ({ keyword: '', filters: {} }),
+  persist: {
+    key: 'page:cache',
+    paths: ['keyword', 'filters']
+  }
+})
+```
+
+### 注意事项
+
+- **全局注册，影响所有 store**。plugin 只在对应 store 声明了 `options[plugin.name]` 时才激活，但注册本身是全局的。
+- **同名 plugin 只能注册一次**，重复注册会被跳过并打印 warning。
+- **install 返回的钩子会被按注册顺序依次调用**（FIFO）。
+- **plugin 之间不通信**。如果两个 plugin 有依赖关系，应该合并成一个。
+- **$vm 在 install 时为 null**。如果 plugin 需要组件实例，应在 `enter` 钩子里访问（此时 `$vm` 已绑定）。
+
 ## 实例模型：Singleton
 
 当前版本采用 **id → singleton** 模型：
@@ -471,16 +604,42 @@ actions: {
 
 ## 调试
 
-`storeRegistry` 是导出的 Map，可以在控制台直接查看：
+### `storeRegistry` —— 导出的 Map
+
+`storeRegistry` 是导出的 Map，可以在代码里用于调试或自定义 devtools 集成：
 
 ```js
 import { storeRegistry } from 'vue-page-store'
 
-// 查看所有活跃 store
 storeRegistry.forEach((store, id) => {
   console.log(id, store.$status, store.$disposed)
 })
 ```
+
+### `window.__VUE_PAGE_STORE__` —— dev 自动挂载 *(v0.5 新增)*
+
+开发环境下（`process.env.NODE_ENV !== 'production'`）会自动挂到 `window.__VUE_PAGE_STORE__`，方便控制台访问。生产环境和 SSR 环境不会挂。
+
+控制台用法：
+
+```js
+__VUE_PAGE_STORE__                        // { registry, stores }
+__VUE_PAGE_STORE__.stores                 // { orderList: {…}, userProfile: {…} }
+__VUE_PAGE_STORE__.stores.orderList       // ← 有属性自动补全
+__VUE_PAGE_STORE__.stores.orderList.$source
+__VUE_PAGE_STORE__.stores.orderList.$loading
+
+// 原始 Map 也保留
+__VUE_PAGE_STORE__.registry.forEach(...)
+```
+
+- `registry`：导出的原始 Map，和 `import { storeRegistry }` 拿到的是同一个引用
+- `stores`：getter，每次读取重建对象视图；销毁的 store 自动消失
+
+**说明**：
+
+- `__VUE_PAGE_STORE__` 是 dev-only 调试接口，shape 和键名可能在后续版本变化，**不要在生产代码里依赖**
+- 微前端场景下，多个子应用都加载 vue-page-store 时，最后挂载的会覆盖前面的。如需共存，请退回手动挂载并用自己的命名
 
 ## 从 v0.3.x 升级
 
@@ -536,11 +695,23 @@ v0.4.0 中：
 - `$setInterval()`：页面级 interval 托管
 - `$loading.xxx`：返回 Promise 的 action 自动追踪 loading
 - `$vm`：只读逃生口，可在 init / enter 中访问 `$route / $router`
+- `registerPlugin()`：外部扩展机制（v0.5）
+
+## 从 v0.4.x 升级到 v0.5
+
+v0.5 **完全向后兼容** v0.4.x：
+
+- 所有 v0.4 的 API 行为不变
+- 新增 `registerPlugin()` 导出，不注册 plugin 等同于 v0.4 行为
+- options 现在允许包含插件声明的额外字段（如 `tasks`、`persist`）
+- dev 环境自动挂 `window.__VUE_PAGE_STORE__`，方便控制台调试
+
+升级只需要改版本号，无需改代码。
 
 ## Roadmap
 
 - **Keyed instance** — `useStore(vm, scopeKey)` 支持同定义多实例
-- **Page cache strategy** — TTL、revalidate、stale-while-enter
+- **Official plugins** — 随着 `vue-page-runtime` 等生态库成熟，补充第一方 plugin 文档
 - **More page runtime helpers** — 在不增加心智负担的前提下继续补页面层能力
 
 ## License

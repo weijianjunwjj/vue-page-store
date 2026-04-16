@@ -1,5 +1,5 @@
 /**
- * vue-page-store v0.4.1 - TypeScript 类型定义
+ * vue-page-store v0.5.0 - TypeScript 类型定义
  *
  * Page Scope Runtime for Vue 2.6
  */
@@ -68,6 +68,9 @@ export interface StoreOptions<
    * interval 在 leave 前已自动清理
    */
   leave?: (this: PageStore<S, Src>) => void;
+
+  /** 允许 plugin 声明的额外字段（v0.5 新增） */
+  [key: string]: any;
 }
 
 export interface Store<
@@ -138,6 +141,8 @@ export type PageStore<
  *   - async action 自动追踪 $loading
  * v0.4.1 变更：
  *   - options 新增 init（bindTo 之后一次性调用）
+ * v0.5 变更：
+ *   - options 支持 plugin 声明的自定义字段
  */
 export declare function definePageStore<
   S extends Record<string, any>,
@@ -149,3 +154,43 @@ export declare function definePageStore<
 
 /** Store 注册表 */
 export declare const storeRegistry: Map<string, PageStore<any, any>>;
+
+// ====== v0.5 新增：plugin 类型 ======
+
+/**
+ * Plugin install 返回的生命周期钩子（v0.5 新增）
+ * page-store 会在对应时机调用
+ */
+export interface PluginHooks {
+  /** 每次 page enter 之后调用（用户 enter hook + page:enter event 之后） */
+  enter?: () => void;
+  /** 每次 page leave 之后调用（用户 leave hook + page:leave event 之后） */
+  leave?: () => void;
+  /** store $destroy 时调用，用于释放 plugin 自己的资源 */
+  destroy?: () => void;
+}
+
+/**
+ * Plugin 定义（v0.5 新增）
+ *
+ * plugin.name 同时作为字段名：
+ *   当 definePageStore options 中存在 options[name] 时，
+ *   page-store 会调用 install(store, fieldValue, { Vue })
+ *
+ * install 在 store 创建末尾、bindTo 之前执行，此时 state/getters/actions/$source/$setInterval 已就绪
+ */
+export interface PageStorePlugin {
+  name: string;
+  install(
+    store: PageStore<any, any>,
+    fieldValue: any,
+    context: { Vue: any }
+  ): PluginHooks | void;
+}
+
+/**
+ * 注册全局 plugin（v0.5 新增）
+ *
+ * 同名 plugin 重复注册会被跳过并打印 warning
+ */
+export declare function registerPlugin(plugin: PageStorePlugin): void;
