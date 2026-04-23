@@ -26,16 +26,65 @@
  */
 
 import Vue from 'vue';
+import * as debug from './debug/emit.js';
 
 // ====== dev-only warning ======
-var isDev = typeof process !== 'undefined'
-  && process.env
-  && process.env.NODE_ENV !== 'production';
+var isDev =
+  typeof process !== 'undefined' &&
+  process.env &&
+  process.env.NODE_ENV !== 'production';
 
 function warn(msg) {
   if (isDev) {
     console.warn('[vue-page-store] ' + msg);
   }
+}
+
+function _now() {
+  return typeof performance !== 'undefined' && performance.now
+    ? performance.now()
+    : Date.now();
+}
+function wrapAction(store, name, boundFn) {
+  return function () {
+    var args = Array.prototype.slice.call(arguments);
+    var t0 = _now();
+    debug.emitDebugEvent(store, 'action:start', { action: name, args: args });
+    var result;
+    try {
+      result = boundFn.apply(null, args);
+    } catch (syncErr) {
+      debug.emitDebugEvent(store, 'action:error', {
+        action: name,
+        duration: +(_now() - t0).toFixed(2),
+        error: (syncErr && syncErr.message) || String(syncErr),
+      });
+      throw syncErr;
+    }
+    if (result && typeof result.then === 'function') {
+      Promise.resolve(result).then(
+        function () {
+          debug.emitDebugEvent(store, 'action:end', {
+            action: name,
+            duration: +(_now() - t0).toFixed(2),
+          });
+        },
+        function (err) {
+          debug.emitDebugEvent(store, 'action:error', {
+            action: name,
+            duration: +(_now() - t0).toFixed(2),
+            error: (err && err.message) || String(err),
+          });
+        },
+      );
+    } else {
+      debug.emitDebugEvent(store, 'action:end', {
+        action: name,
+        duration: +(_now() - t0).toFixed(2),
+      });
+    }
+    return result;
+  };
 }
 
 // Store 注册表（导出供调试 / devtools 使用）
@@ -47,7 +96,9 @@ if (isDev && typeof window !== 'undefined') {
     registry: storeRegistry,
     get stores() {
       var result = {};
-      storeRegistry.forEach(function (s, id) { result[id] = s; });
+      storeRegistry.forEach(function (s, id) {
+        result[id] = s;
+      });
       return result;
     },
   };
@@ -70,9 +121,15 @@ function registerPlugin(plugin) {
     throw new Error('[vue-page-store] plugin 需要一个 name 属性');
   }
   if (typeof plugin.install !== 'function') {
-    throw new Error('[vue-page-store] plugin "' + plugin.name + '" 需要一个 install 方法');
+    throw new Error(
+      '[vue-page-store] plugin "' + plugin.name + '" 需要一个 install 方法',
+    );
   }
-  if (_plugins.some(function (p) { return p.name === plugin.name; })) {
+  if (
+    _plugins.some(function (p) {
+      return p.name === plugin.name;
+    })
+  ) {
     warn('plugin "' + plugin.name + '" 已注册，跳过重复注册');
     return;
   }
@@ -83,7 +140,8 @@ function createStoreInstance(Vue, id, options) {
   var initialState = options.state();
 
   // ====== v0.4 新增：source ======
-  var initialSource = (typeof options.source === 'function') ? options.source() : {};
+  var initialSource =
+    typeof options.source === 'function' ? options.source() : {};
 
   var getters = options.getters || {};
   var actions = options.actions || {};
@@ -109,19 +167,19 @@ function createStoreInstance(Vue, id, options) {
     data: function () {
       return {
         $$state: initialState,
-        $$source: initialSource,     // v0.4 新增
-        $$loading: {},               // v0.4 新增
+        $$source: initialSource, // v0.4 新增
+        $$loading: {}, // v0.4 新增
         $$status: {
           mounted: false,
-          active: false
-        }
+          active: false,
+        },
       };
     },
     computed: computedDefs,
   });
 
   var rawState = vm.$data.$$state;
-  var rawSource = vm.$data.$$source;   // v0.4 新增
+  var rawSource = vm.$data.$$source; // v0.4 新增
   var rawLoading = vm.$data.$$loading; // v0.4 新增
   var rawStatus = vm.$data.$$status;
 
@@ -130,7 +188,9 @@ function createStoreInstance(Vue, id, options) {
     Object.defineProperty(store, key, {
       enumerable: true,
       configurable: true,
-      get: function () { return rawState[key]; },
+      get: function () {
+        return rawState[key];
+      },
       set: function (val) {
         if (store.$disposed) {
           warn('store "' + id + '" 已销毁，忽略对 "' + key + '" 的写入');
@@ -151,12 +211,14 @@ function createStoreInstance(Vue, id, options) {
   Object.keys(getters).forEach(function (key) {
     Object.defineProperty(store, key, {
       enumerable: true,
-      get: function () { return vm[key]; },
+      get: function () {
+        return vm[key];
+      },
     });
   });
 
   // ====== actions —— v0.4 变更：自动增强 async action ======
-  var _loadingCounts = {};  // 并发计数器，防止先返回的 finally 提前关 loading
+  var _loadingCounts = {}; // 并发计数器，防止先返回的 finally 提前关 loading
 
   function finishLoading(key) {
     _loadingCounts[key]--;
@@ -170,7 +232,7 @@ function createStoreInstance(Vue, id, options) {
     var originalFn = actions[key];
     var boundFn = originalFn.bind(store);
 
-    store[key] = function () {
+    var withLoading = function () {
       var result = boundFn.apply(null, arguments);
 
       // 检测是否返回 Promise，如果是则自动追踪 loading
@@ -181,13 +243,19 @@ function createStoreInstance(Vue, id, options) {
 
         var tracked = Promise.resolve(result);
         tracked.then(
-          function () { finishLoading(key); },
-          function () { finishLoading(key); }
+          function () {
+            finishLoading(key);
+          },
+          function () {
+            finishLoading(key);
+          },
         );
       }
 
       return result;
     };
+
+    store[key] = wrapAction(store, key, withLoading);
   });
 
   // ====== watch —— 声明式副作用，生命周期自动回收 ======
@@ -209,14 +277,20 @@ function createStoreInstance(Vue, id, options) {
 
       if (!handler) {
         warn(
-          'watch "' + path + '" in store "' + id + '" 缺少 handler，该 watcher 将被跳过'
+          'watch "' +
+            path +
+            '" in store "' +
+            id +
+            '" 缺少 handler，该 watcher 将被跳过',
         );
         return;
       }
     }
 
     var expr = function () {
-      return path.split('.').reduce(function (obj, k) { return obj && obj[k]; }, store);
+      return path.split('.').reduce(function (obj, k) {
+        return obj && obj[k];
+      }, store);
     };
     vm.$watch(expr, handler.bind(store), watchOpts);
   });
@@ -231,7 +305,9 @@ function createStoreInstance(Vue, id, options) {
   Object.defineProperty(store, '$vm', {
     enumerable: true,
     configurable: false,
-    get: function () { return _vm_ref; },
+    get: function () {
+      return _vm_ref;
+    },
     set: function () {
       warn('$vm 是只读属性，不允许业务侧重写');
     },
@@ -271,7 +347,8 @@ function createStoreInstance(Vue, id, options) {
     });
 
     // v0.4 新增：重置 source
-    var freshSource = (typeof options.source === 'function') ? options.source() : {};
+    var freshSource =
+      typeof options.source === 'function' ? options.source() : {};
     Object.keys(freshSource).forEach(function (key) {
       Vue.set(rawSource, key, freshSource[key]);
     });
@@ -287,7 +364,10 @@ function createStoreInstance(Vue, id, options) {
 
   store.$emit = function (event, payload) {
     var fns = _listeners[event];
-    if (fns) fns.slice().forEach(function (fn) { fn(payload); });
+    if (fns)
+      fns.slice().forEach(function (fn) {
+        fn(payload);
+      });
   };
 
   store.$on = function (event, handler) {
@@ -363,7 +443,9 @@ function createStoreInstance(Vue, id, options) {
     }
     store.$emit('page:enter');
     // v0.5: plugin enter hooks
-    _pluginHooks.forEach(function (h) { if (h.enter) h.enter(); });
+    _pluginHooks.forEach(function (h) {
+      if (h.enter) h.enter();
+    });
   }
 
   function runLeave() {
@@ -377,7 +459,9 @@ function createStoreInstance(Vue, id, options) {
     }
     store.$emit('page:leave');
     // v0.5: plugin leave hooks
-    _pluginHooks.forEach(function (h) { if (h.leave) h.leave(); });
+    _pluginHooks.forEach(function (h) {
+      if (h.leave) h.leave();
+    });
   }
 
   // ====== bindTo 去重标记 ======
@@ -391,7 +475,10 @@ function createStoreInstance(Vue, id, options) {
   }
 
   function addBoundVm(vm) {
-    if (_boundVms) { _boundVms.add(vm); return; }
+    if (_boundVms) {
+      _boundVms.add(vm);
+      return;
+    }
     _boundVmsFallback.push(vm);
   }
 
@@ -456,10 +543,17 @@ function createStoreInstance(Vue, id, options) {
     clearAllIntervals();
 
     // v0.5: plugin destroy hooks
-    _pluginHooks.forEach(function (h) { if (h.destroy) h.destroy(); });
+    _pluginHooks.forEach(function (h) {
+      if (h.destroy) h.destroy();
+    });
 
     store.$disposed = true;
-    Object.keys(_listeners).forEach(function (key) { delete _listeners[key]; });
+    Object.keys(_listeners).forEach(function (key) {
+      delete _listeners[key];
+    });
+
+    debug.emitDebugEvent(store, 'store:destroy');
+
     vm.$destroy();
     storeRegistry.delete(id);
   };
@@ -493,10 +587,14 @@ function createStoreInstance(Vue, id, options) {
 function definePageStore(id, options) {
   // 入参校验
   if (!id || typeof id !== 'string') {
-    throw new Error('[vue-page-store] definePageStore 需要一个非空字符串作为 id');
+    throw new Error(
+      '[vue-page-store] definePageStore 需要一个非空字符串作为 id',
+    );
   }
   if (!options || typeof options.state !== 'function') {
-    throw new Error('[vue-page-store] definePageStore("' + id + '") 需要 state 为函数');
+    throw new Error(
+      '[vue-page-store] definePageStore("' + id + '") 需要 state 为函数',
+    );
   }
 
   var _Vue = Vue;
@@ -517,6 +615,17 @@ function definePageStore(id, options) {
       options.init.call(store);
     }
 
+    var _debugId = debug.nextId();
+
+    Object.defineProperty(store, '_debugId', {
+      value: _debugId,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    });
+
+    debug.emitDebugEvent(store, 'store:create', { debugId: _debugId });
+
     return store;
   };
 }
@@ -524,7 +633,7 @@ function definePageStore(id, options) {
 var index = {
   definePageStore: definePageStore,
   registerPlugin: registerPlugin,
-  storeRegistry: storeRegistry
+  storeRegistry: storeRegistry,
 };
 
 export { index as default, definePageStore, registerPlugin, storeRegistry };
