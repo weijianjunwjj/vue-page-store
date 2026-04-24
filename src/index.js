@@ -1,10 +1,10 @@
 /*!
- * vue-page-store v0.5.0
+ * vue-page-store v0.5.1
  * (c) 2026 weijianjun
  * @license MIT
  */
 /**
- * vue-page-store 0.5.0 — Vue 2.6 Page Scope Runtime
+ * vue-page-store 0.5.1 — Vue 2.6 Page Scope Runtime
  *
  * 页面级作用域运行时容器：
  * source · state · getters · actions · watch · init/enter/leave · $setInterval · event bus · plugin
@@ -21,6 +21,10 @@
  * v0.5 新增：
  *   plugin     → registerPlugin 注册外部扩展，声明字段 + 生命周期钩子
  *
+ * v0.5.1 修复/新增：
+ *   isDev      → try/catch 兜底，修复 Vite / webpack 5 不 polyfill process 时报错
+ *   debug      → dev-only 调试工具：store 创建/销毁追踪、action 埋点、DevPanel
+ *
  * @author weijianjun
  * @license MIT
  */
@@ -29,10 +33,15 @@ import Vue from 'vue';
 import * as debug from './debug/emit.js';
 
 // ====== dev-only warning ======
-var isDev =
-  typeof process !== 'undefined' &&
-  process.env &&
-  process.env.NODE_ENV !== 'production';
+// v0.5.1 修复：try/catch 兜底，Vite / webpack 5 不 polyfill process 时不再报错
+var isDev = false;
+try {
+  isDev = typeof process !== 'undefined'
+    && process.env
+    && process.env.NODE_ENV !== 'production';
+} catch (e) {
+  // Vite / webpack 5 等环境下 process 未定义或 process.env 被 getter 拦截
+}
 
 function warn(msg) {
   if (isDev) {
@@ -40,6 +49,7 @@ function warn(msg) {
   }
 }
 
+// ====== debug: wrapAction helper ======
 function _now() {
   return typeof performance !== 'undefined' && performance.now
     ? performance.now()
@@ -255,6 +265,7 @@ function createStoreInstance(Vue, id, options) {
       return result;
     };
 
+    // v0.5.1：debug 包装套在 $loading 追踪外层
     store[key] = wrapAction(store, key, withLoading);
   });
 
@@ -551,11 +562,11 @@ function createStoreInstance(Vue, id, options) {
     Object.keys(_listeners).forEach(function (key) {
       delete _listeners[key];
     });
-
-    debug.emitDebugEvent(store, 'store:destroy');
-
     vm.$destroy();
     storeRegistry.delete(id);
+
+    // v0.5.1 debug: 放在所有清理之后
+    debug.emitDebugEvent(store, 'store:destroy');
   };
 
   store._vm = vm;
@@ -568,6 +579,16 @@ function createStoreInstance(Vue, id, options) {
     var hooks = plugin.install(store, fieldValue, { Vue: Vue });
     if (hooks) _pluginHooks.push(hooks);
   });
+
+  // ====== v0.5.1 debug: 注册到 devtools registry ======
+  var _debugId = debug.nextId();
+  Object.defineProperty(store, '_debugId', {
+    value: _debugId,
+    writable: false,
+    enumerable: false,
+    configurable: false,
+  });
+  debug.emitDebugEvent(store, 'store:create', { debugId: _debugId });
 
   return store;
 }
@@ -614,17 +635,6 @@ function definePageStore(id, options) {
     if (typeof options.init === 'function') {
       options.init.call(store);
     }
-
-    var _debugId = debug.nextId();
-
-    Object.defineProperty(store, '_debugId', {
-      value: _debugId,
-      writable: false,
-      enumerable: false,
-      configurable: false,
-    });
-
-    debug.emitDebugEvent(store, 'store:create', { debugId: _debugId });
 
     return store;
   };

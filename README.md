@@ -641,6 +641,103 @@ __VUE_PAGE_STORE__.registry.forEach(...)
 - `__VUE_PAGE_STORE__` 是 dev-only 调试接口，shape 和键名可能在后续版本变化，**不要在生产代码里依赖**
 - 微前端场景下，多个子应用都加载 vue-page-store 时，最后挂载的会覆盖前面的。如需共存，请退回手动挂载并用自己的命名
 
+### `window.PAGE_STORE_DEVTOOLS` —— debug 注册表 *(v0.5.1 新增)*
+
+v0.5.1 新增了 dev-only 的 debug 模块，在 `window.PAGE_STORE_DEVTOOLS` 上暴露结构化调试数据：
+
+```js
+window.PAGE_STORE_DEVTOOLS
+// {
+//   stores: Map,     ← store 元信息（id、active、destroyed、storeRef…）
+//   events: [],      ← 事件时间线（最近 500 条）
+//   seq: number      ← 全局递增计数
+// }
+```
+
+#### 自动采集的事件
+
+| 事件 | 说明 |
+|---|---|
+| `store:create` | store 实例创建 |
+| `store:destroy` | store 实例销毁 |
+| `action:start` | action 调用开始（含参数快照） |
+| `action:end` | action 调用结束（含 duration） |
+| `action:error` | action 抛错或 reject（含错误信息和 duration） |
+
+每条事件包含 `seq`（全局序号）、`ts`（时间戳）、`storeId`、`type`、`payload`。
+
+#### 控制台用法
+
+```js
+// 查看当前存活的 store
+PAGE_STORE_DEVTOOLS.stores
+
+// 查看最近的事件
+PAGE_STORE_DEVTOOLS.events.slice(-5)
+
+// 筛选某个 store 的 action 事件
+PAGE_STORE_DEVTOOLS.events
+  .filter(e => e.storeId === 'orderList' && e.type.startsWith('action:'))
+
+// 查看 action 耗时
+PAGE_STORE_DEVTOOLS.events
+  .filter(e => e.type === 'action:end')
+  .map(e => e.payload.action + ': ' + e.payload.duration + 'ms')
+```
+
+生产环境下 `PAGE_STORE_DEVTOOLS` 不会被挂载，所有 debug 逻辑为 no-op。
+
+### DevPanel —— 页面内悬浮面板 *(v0.5.1 新增)*
+
+v0.5.1 提供了一个最小的页面内调试面板，在右下角悬浮显示：
+
+- **左侧**：store 列表（显示 active / idle / destroyed 状态）
+- **右侧四个 tab**：
+  - `$state` — 当前选中 store 的业务状态
+  - `$source` — 页面输入 / 原始返回
+  - `getters` — 派生计算值
+  - `events` — 该 store 最近 50 条事件
+
+面板每 500ms 刷新一次，实时反映 store 变化。
+
+#### 接入方式
+
+```js
+// main.js — 仅开发环境加载
+if (process.env.NODE_ENV !== 'production') {
+  import('vue-page-store/debug/installPanel').then(m => m.installDevPanel())
+}
+```
+
+面板会自动挂载到 `document.body`，不侵入业务组件树。生产环境下 `installDevPanel()` 是 no-op。
+
+#### 注意事项
+
+- DevPanel 是独立 Vue 实例，不影响业务组件树
+- 需要构建链能处理 `.vue` SFC（webpack + vue-loader 或 Vite 默认支持）
+- 微前端场景下，多个子应用各自挂面板，互不干扰
+- 这是 dev-only 工具，不要在生产代码里依赖
+
+#### 强制开启
+
+Vite / webpack 5 等不 polyfill `process` 的环境下，如果 `isDev` 检测失败，可以在**页面加载前**手动设置：
+
+```js
+window.__VUE_PAGE_STORE_DEV__ = true
+```
+
+### debug 模块文件结构
+
+```
+src/debug/
+  ├── registry.js      ← window.PAGE_STORE_DEVTOOLS 数据层
+  ├── emit.js          ← emitDebugEvent 埋点入口
+  ├── DevPanel.vue     ← 悬浮面板组件
+  └── installPanel.js  ← 面板挂载器
+```
+
+所有 debug 文件仅在 dev 环境生效。生产构建中：`registry.js` 和 `emit.js` 中的所有函数早 return / 返回空值，不执行任何逻辑，不挂 `window`，不占内存。如果你的打包器支持 tree-shaking 且 `import('...installPanel')` 走动态导入，面板代码不会进入生产包。
+
 ## 从 v0.3.x 升级
 
 ### Breaking Changes
@@ -708,11 +805,23 @@ v0.5 **完全向后兼容** v0.4.x：
 
 升级只需要改版本号，无需改代码。
 
+## 从 v0.5.0 升级到 v0.5.1
+
+v0.5.1 **完全向后兼容** v0.5.0：
+
+- **修复**：`isDev` 检测改用 `try/catch` 兜底，修复 Vite / webpack 5 不 polyfill `process` 时模块加载报错的问题
+- **新增**：dev-only debug 模块（`debug/registry.js`、`debug/emit.js`、`debug/DevPanel.vue`、`debug/installPanel.js`）
+- **新增**：`window.PAGE_STORE_DEVTOOLS` 调试注册表，自动采集 store 创建/销毁和 action 调用事件
+- **新增**：DevPanel 悬浮面板，可视化查看 store 列表、state/source/getters、事件时间线
+
+升级只需要改版本号。debug 模块为可选接入，不接入等同于 v0.5.0 行为。
+
 ## Roadmap
 
 - **Keyed instance** — `useStore(vm, scopeKey)` 支持同定义多实例
 - **Official plugins** — 随着 `vue-page-runtime` 等生态库成熟，补充第一方 plugin 文档
 - **More page runtime helpers** — 在不增加心智负担的前提下继续补页面层能力
+- **Vue Devtools 集成** — 在 debug 模块基础上对接 Vue Devtools inspector / timeline API
 
 ## License
 

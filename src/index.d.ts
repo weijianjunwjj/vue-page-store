@@ -1,5 +1,5 @@
 /**
- * vue-page-store v0.5.0 - TypeScript 类型定义
+ * vue-page-store v0.5.1 - TypeScript 类型定义
  *
  * Page Scope Runtime for Vue 2.6
  */
@@ -194,3 +194,59 @@ export interface PageStorePlugin {
  * 同名 plugin 重复注册会被跳过并打印 warning
  */
 export declare function registerPlugin(plugin: PageStorePlugin): void;
+
+// ====== v0.5.1 新增：debug 模块类型 ======
+
+/** debug 事件记录 */
+export interface DebugEvent {
+  seq: number;
+  ts: number;
+  storeId: string;
+  type:
+    | 'store:create'
+    | 'store:destroy'
+    | 'lifecycle:init'
+    | 'lifecycle:enter'
+    | 'lifecycle:leave'
+    | 'action:start'
+    | 'action:end'
+    | 'action:error'
+    | 'state:set'
+    | 'state:patch';
+  payload?: any;
+}
+
+/** debug 注册表中的 store 元信息 */
+export interface DebugStoreMeta {
+  id: string;
+  name: string;
+  route: { path: string; fullPath: string; name?: string } | null;
+  createdAt: number;
+  active: boolean;
+  destroyed: boolean;
+  keepAlive: boolean;
+  storeRef: PageStore<any, any>;
+}
+
+/** window.PAGE_STORE_DEVTOOLS 的类型 */
+export interface PageStoreDevtools {
+  stores: Map<string, DebugStoreMeta>;
+  events: DebugEvent[];
+  seq: number;
+}
+
+/**
+ * 挂载 DevPanel 悬浮面板到 document.body（v0.5.1 新增）
+ *
+ * 仅 dev 环境生效，生产环境 no-op
+ * 幂等，多次调用只挂一次
+ *
+ * @example
+ * ```js
+ * // main.js
+ * if (process.env.NODE_ENV !== 'production') {
+ *   import('vue-page-store/debug/installPanel').then(m => m.installDevPanel())
+ * }
+ * ```
+ */
+export declare function installDevPanel(): void;

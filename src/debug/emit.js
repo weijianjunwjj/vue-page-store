@@ -17,13 +17,10 @@
  *   lifecycle:enter    payload = undefined        → updateStore(id, { active: true, route })
  *   lifecycle:leave    payload = undefined        → updateStore(id, { active: false })
  *   action:start       payload = { action, args } → 仅写事件
- *   action:end         payload = { action, duration, result? } → 仅写事件
- *   action:error       payload = { action, duration, error }   → 仅写事件
+ *   action:end         payload = { action, duration } → 仅写事件
+ *   action:error       payload = { action, duration, error } → 仅写事件
  *   state:set          payload = { key, value }   → 仅写事件
  *   state:patch        payload = { patch }        → 仅写事件
- *
- * meta 同步选择 updateStore 而非 removeStore：store:destroy 后保留 meta 并标记
- * destroyed:true，让调试者能看到销毁瞬间的现场。物理删除交由 removeStore 手动调用。
  */
 
 import {
@@ -36,9 +33,6 @@ import {
 
 // ---- helpers ----
 
-/**
- * 不依赖 Vue —— 只是运行时读 store.$vm.$route 字段，装了 vue-router 就有。
- */
 function readRoute(store) {
   try {
     var vm = store && store.$vm;
@@ -53,11 +47,6 @@ function readRoute(store) {
   return null;
 }
 
-/**
- * payload 序列化快照。
- * 事件是时间线数据，必须拷贝"当下值"，不能持活引用（否则面板看的是现在的值）。
- * 循环引用 / 不可序列化对象降级为占位符字符串，不抛错。
- */
 function snapshot(v) {
   if (v === undefined) return undefined;
   if (v === null) return null;
@@ -106,7 +95,6 @@ export function emitDebugEvent(store, type, payload) {
         updateStore(id, { active: false });
         break;
       default:
-        // action:* / state:* 只写事件流，不动 meta
         break;
     }
 
@@ -120,7 +108,9 @@ export function emitDebugEvent(store, type, payload) {
     addEvent(event);
     return event;
   } catch (e) {
-    // 埋点自身出错绝不能影响业务
     return null;
   }
 }
+
+// Re-export：让 index.js 只需要 import 一个 debug 入口
+export { nextId } from './registry.js';
