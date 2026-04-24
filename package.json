@@ -36,6 +36,6 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/weijianjunwjj/vue-page-store.git"
+    "url": "git+https://github.com/weijianjunwjj/vue-page-store.git"
   }
 }
