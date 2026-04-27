@@ -10,6 +10,7 @@
   "types": "dist/index.d.ts",
   "files": [
     "dist",
+    "src/debug",
     "README.md",
     "LICENSE"
   ],
