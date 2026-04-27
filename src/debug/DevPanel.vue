@@ -63,7 +63,9 @@
 </template>
 
 <script>
-import { getStores, getEvents } from './registry.js';
+function _dt() {
+  return (typeof window !== 'undefined' && window.PAGE_STORE_DEVTOOLS) || null;
+}
 
 export default {
   name: 'PageStoreDevPanel',
@@ -82,8 +84,10 @@ export default {
   computed: {
     stores: function () {
       this.tick; // 建立响应式依赖，500ms 驱动刷新
+      var dt = _dt();
+      if (!dt) return [];
       var list = [];
-      getStores().forEach(function (m) { list.push(m); });
+      dt.stores.forEach(function (m) { list.push(m); });
       return list;
     },
 
@@ -133,8 +137,10 @@ export default {
     filteredEvents: function () {
       this.tick;
       if (!this.selectedStore) return [];
+      var dt = _dt();
+      if (!dt) return [];
       var id = this.selectedStore.id;
-      var all = getEvents();
+      var all = dt.events;
       var filtered = [];
       for (var i = all.length - 1; i >= 0 && filtered.length < 50; i--) {
         if (all[i].storeId === id) filtered.push(all[i]);

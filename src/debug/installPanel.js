@@ -1,11 +1,12 @@
 import Vue from 'vue';
-import { isDev } from './registry.js';
 import DevPanel from './DevPanel.vue';
 
 var _mounted = false;
 
 export function installDevPanel() {
-  if (!isDev) return;
+  // 不 import registry —— 避免和 dist/index.esm.js 内联的 registry 产生双实例
+  // 直接检查 window.PAGE_STORE_DEVTOOLS 是否已被主入口创建
+  if (typeof window === 'undefined' || !window.PAGE_STORE_DEVTOOLS) return;
   if (_mounted) return;
   if (typeof document === 'undefined') return;
   _mounted = true;
